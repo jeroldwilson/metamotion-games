@@ -72,7 +72,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--keyboard", action="store_true",
-        help="Use keyboard instead of sensor (arrow keys + SPACE)"
+        help="Use keyboard instead of sensor — alias for --mode keyboard"
+    )
+    p.add_argument(
+        "--mode", choices=["keyboard", "standard", "accessible"],
+        default=None,
+        metavar="MODE",
+        help="Control and game mode: keyboard | standard (VEERA) | accessible (ASTRA) — default with sensor: ASTRA (Accessible)"
     )
     p.add_argument(
         "--scan", action="store_true",
@@ -163,9 +169,18 @@ def _print_controls() -> None:
 
 # ── Gesture source factory ────────────────────────────────────────────────────
 
-def _build_gesture_source(args: argparse.Namespace):
-    """Build and start the appropriate gesture source. Returns (gesture_src, sensor)."""
+def _resolve_mode(args: argparse.Namespace) -> str:
+    """Determine the effective mode string from CLI arguments."""
+    if args.mode is not None:
+        return args.mode
     if args.keyboard:
+        return "keyboard"
+    return "accessible"   # sensor connected → ASTRA mode by default
+
+
+def _build_gesture_source(args: argparse.Namespace, mode: str):
+    """Build and start the appropriate gesture source. Returns (gesture_src, sensor)."""
+    if mode == "keyboard":
         from shared.gesture import KeyboardFallback
         gs = KeyboardFallback()
         gs.start()
@@ -176,7 +191,8 @@ def _build_gesture_source(args: argparse.Namespace):
     from shared.sensor  import MetaMotionSensor
     from shared.gesture import GestureInterpreter, GestureConfig
 
-    _print_splash("MetaMotion SENSOR")
+    label = "MetaMotion SENSOR  [ASTRA]" if mode == "accessible" else "MetaMotion SENSOR  [VEERA]"
+    _print_splash(label)
     _print_controls()
 
     sensor = MetaMotionSensor(scan_timeout=12)
@@ -212,32 +228,50 @@ def main() -> None:
         sys.exit(0)
 
     # ── Initialize pygame once (owned here for the full session) ──────────
+    pygame.mixer.pre_init(44100, -16, 2, 512)   # request quality before init
     pygame.init()
-    flags  = pygame.FULLSCREEN if args.fullscreen else 0
-    screen = pygame.display.set_mode((800, 600), flags)
+    if args.fullscreen:
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    else:
+        screen = pygame.display.set_mode((800, 600))
     pygame.display.set_caption("MetaMotion Arcade")
     clock  = pygame.time.Clock()
 
-    # ── Build gesture source once (sensor + interpreter live for the session)
-    gesture_src, sensor = _build_gesture_source(args)
+    # ── Determine mode and build gesture source ───────────────────────────
+    mode = _resolve_mode(args)
+    gesture_src, sensor = _build_gesture_source(args, mode)
+
+    # ── Audio ──────────────────────────────────────────────────────────────
+    from shared.audio import make_audio_manager
+    audio = make_audio_manager()
 
     # ── Main selection loop ────────────────────────────────────────────────
     from home import HomeScreen
     from games.bricks.game import BricksGame
     from games.snake.game  import SnakeGame
 
-    home = HomeScreen(screen, clock)
+    home = HomeScreen(screen, clock, mode=mode)
 
     try:
         while True:
+            # pygame mutates the display surface in-place on resize, so we
+            # compare the current size against the size home was laid out for.
+            cur = pygame.display.get_surface()
+            if cur.get_size() != home._layout_size:
+                home._init_layout(cur)
+
             selected = home.run(gesture_src)
+            mode = home.mode   # may have been toggled on the home screen
+
+            # Use the live display surface when creating each game.
+            cur = pygame.display.get_surface()
 
             if selected == "bricks":
-                game = BricksGame(screen, clock, debug=args.debug)
+                game = BricksGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
                 game.run(gesture_src)   # returns "home"
 
             elif selected == "snake":
-                game = SnakeGame(screen, clock, debug=args.debug)
+                game = SnakeGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
                 game.run(gesture_src)   # returns "home"
 
     except KeyboardInterrupt:

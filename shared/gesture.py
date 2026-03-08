@@ -70,6 +70,10 @@ class GestureConfig:
     # Keep sensor still during this period.
     calibration_samples: int = 100
 
+    # Minimum seconds between gesture triggers on each axis.
+    # Used by game modules in accessible mode; GestureInterpreter ignores it.
+    gesture_cooldown: float = 0.8
+
 
 # ── Gesture state ─────────────────────────────────────────────────────────────
 
