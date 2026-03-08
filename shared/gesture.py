@@ -101,6 +101,13 @@ class GestureState:
     raw_ax : float  — tilt value relative to calibrated neutral (for debug HUD)
     raw_gz : float  — smoothed gyroscope Z (for debug HUD)
     calibrated : bool  — False while collecting calibration samples
+
+    abs_ax : float  — smoothed absolute accelerometer ax (g) — for calibration view
+    abs_ay : float  — smoothed absolute accelerometer ay (g)
+    abs_az : float  — smoothed absolute accelerometer az (g)
+    abs_gx : float  — raw gyro gx (°/s)
+    abs_gy : float  — raw gyro gy (°/s)
+    abs_gz : float  — raw gyro gz (°/s)
     """
     paddle_velocity: float = 0.0
     launch: bool = False
@@ -109,6 +116,13 @@ class GestureState:
     raw_ax: float = 0.0
     raw_gz: float = 0.0
     calibrated: bool = False
+    # Absolute IMU values for calibration visualizer
+    abs_ax: float = 0.0
+    abs_ay: float = 0.0
+    abs_az: float = 0.0
+    abs_gx: float = 0.0
+    abs_gy: float = 0.0
+    abs_gz: float = 0.0
 
 
 # ── Main interpreter ──────────────────────────────────────────────────────────
@@ -187,6 +201,12 @@ class GestureInterpreter:
                 raw_ax=self.state.raw_ax,
                 raw_gz=self.state.raw_gz,
                 calibrated=self.state.calibrated,
+                abs_ax=self.state.abs_ax,
+                abs_ay=self.state.abs_ay,
+                abs_az=self.state.abs_az,
+                abs_gx=self.state.abs_gx,
+                abs_gy=self.state.abs_gy,
+                abs_gz=self.state.abs_gz,
             )
 
     # ── Processing loop ────────────────────────────────────────────────────────
@@ -295,6 +315,13 @@ class GestureInterpreter:
             self.state.raw_ax          = tilt   # calibration-relative for HUD
             self.state.raw_gz          = gz
             self.state.calibrated      = True
+            # Absolute IMU values for calibration visualizer
+            self.state.abs_ax          = self._smooth_ax
+            self.state.abs_ay          = self._smooth_ay
+            self.state.abs_az          = self._smooth_az
+            self.state.abs_gx          = s.gx
+            self.state.abs_gy          = s.gy
+            self.state.abs_gz          = s.gz
 
         # Log every 10th sample (~10 Hz at 100 Hz sensor rate)
         self._sample_count += 1

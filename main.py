@@ -134,14 +134,13 @@ async def _scan_and_print(timeout: float = 10.0) -> None:
 # ── Splash screen ─────────────────────────────────────────────────────────────
 
 SPLASH = r"""
-  ██████╗ ██████╗ ██╗ ██████╗██╗  ██╗███████╗
-  ██╔══██╗██╔══██╗██║██╔════╝██║ ██╔╝██╔════╝
-  ██████╔╝██████╔╝██║██║     █████╔╝ ███████╗
-  ██╔══██╗██╔══██╗██║██║     ██╔═██╗ ╚════██║
-  ██████╔╝██║  ██║██║╚██████╗██║  ██╗███████║
-  ╚═════╝ ╚═╝  ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝
-
-     MetaMotion Wrist-Gesture Arcade
+  █████╗ ██████╗  ██████╗ █████╗ ██████╗ ███████╗
+ ██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔══██╗██╔════╝
+ ███████║██████╔╝██║     ███████║██║  ██║█████╗
+ ██╔══██║██╔══██╗██║     ██╔══██║██║  ██║██╔══╝
+ ██║  ██║██║  ██║╚██████╗██║  ██║██████╔╝███████╗
+ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═════╝╚══════╝
+          F  O  R     A  L  L
 """
 
 def _print_splash(mode: str) -> None:
@@ -234,7 +233,7 @@ def main() -> None:
         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     else:
         screen = pygame.display.set_mode((800, 600))
-    pygame.display.set_caption("MetaMotion Arcade")
+    pygame.display.set_caption("Arcade for All")
     clock  = pygame.time.Clock()
 
     # ── Determine mode and build gesture source ───────────────────────────
@@ -272,6 +271,11 @@ def main() -> None:
 
             elif selected == "snake":
                 game = SnakeGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
+                game.run(gesture_src)   # returns "home"
+
+            elif selected == "calibration":
+                from games.calibration.game import CalibrationGame
+                game = CalibrationGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
                 game.run(gesture_src)   # returns "home"
 
     except KeyboardInterrupt:

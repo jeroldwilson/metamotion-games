@@ -33,6 +33,7 @@ DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
+# Base game list (calibration appended dynamically when sensor is connected)
 GAMES = ["bricks", "snake"]
 
 GAME_META = {
@@ -47,6 +48,12 @@ GAME_META = {
         "desc":    ["Eat food, grow longer!", "Tilt wrist to steer.", "Avoid walls and yourself."],
         "desc_ac": ["Eat food, grow longer!", "Move wrist — snake finds the way!", "Walls wrap, no game over!"],
         "accent":  (100, 240, 120),
+    },
+    "calibration": {
+        "title":   "CALIBRATE",
+        "desc":    ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
+        "desc_ac": ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
+        "accent":  (255, 170, 50),
     },
 }
 
@@ -78,6 +85,7 @@ class HomeScreen:
         self._clock  = clock
         self.mode    = mode   # mutable; games read this after run() returns
 
+        self._games: list = self._compute_games()
         self._selected_idx: int = 0
         self._hover_idx: Optional[int] = None
 
@@ -92,6 +100,13 @@ class HomeScreen:
 
         self._init_layout(screen)
 
+    def _compute_games(self) -> list:
+        """Return the ordered game list; calibration appended when sensor connected."""
+        games = list(GAMES)   # ["bricks", "snake"]
+        if self.mode != "keyboard":
+            games.append("calibration")
+        return games
+
     def _init_layout(self, screen: pygame.Surface) -> None:
         """Compute all screen-size-dependent layout variables."""
         self._screen = screen
@@ -103,11 +118,20 @@ class HomeScreen:
         sc = min(sw / W, sh / H)   # W, H are the module-level 800×600 base
         self._sc = sc
 
-        card_w   = int(CARD_W  * sc)
+        n = len(self._games)
         card_h   = int(CARD_H  * sc)
-        card_gap = int(CARD_GAP * sc)
         card_y   = int(CARD_Y  * sc)
-        margin   = (sw - len(GAMES) * card_w - (len(GAMES) - 1) * card_gap) // 2
+
+        # Scale card_w and gap to fit n cards across the screen
+        if n <= 2:
+            card_gap = int(CARD_GAP * sc)
+            card_w   = int(CARD_W * sc)
+            margin   = (sw - n * card_w - (n - 1) * card_gap) // 2
+        else:
+            card_gap = max(int(15 * sc), int(CARD_GAP * sc) // 3)
+            margin   = max(int(12 * sc), int(20 * sc))
+            card_w   = (sw - 2 * margin - (n - 1) * card_gap) // n
+            card_w   = min(card_w, int(CARD_W * sc))
 
         self._card_w   = card_w
         self._card_h   = card_h
@@ -119,7 +143,7 @@ class HomeScreen:
         self._font_desc  = pygame.font.SysFont("monospace", max( 8, int(14 * sc)))
 
         self._card_rects = []
-        for i in range(len(GAMES)):
+        for i in range(n):
             x = margin + i * (card_w + card_gap)
             self._card_rects.append(pygame.Rect(x, card_y, card_w, card_h))
 
@@ -167,7 +191,7 @@ class HomeScreen:
             elif event.key == pygame.K_RIGHT:
                 self._navigate(1)
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                return GAMES[self._selected_idx]
+                return self._games[self._selected_idx]
             elif event.key == pygame.K_m:
                 self._cycle_mode()
             elif event.key == pygame.K_f:
@@ -177,7 +201,7 @@ class HomeScreen:
                 sys.exit(0)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self._hover_idx is not None:
-                return GAMES[self._hover_idx]
+                return self._games[self._hover_idx]
         return None
 
     def _update_hover(self) -> None:
@@ -198,7 +222,7 @@ class HomeScreen:
 
         # Flick (launch gesture) confirms selection
         if gs.launch:
-            return GAMES[self._selected_idx]
+            return self._games[self._selected_idx]
 
         # Determine current tilt direction
         direction = 0
@@ -235,20 +259,23 @@ class HomeScreen:
         return None
 
     def _navigate(self, direction: int) -> None:
-        self._selected_idx = (self._selected_idx + direction) % len(GAMES)
+        self._selected_idx = (self._selected_idx + direction) % len(self._games)
 
     def _cycle_mode(self) -> None:
         """Cycle standard ↔ accessible (keyboard mode is fixed at launch)."""
         if self.mode == "keyboard":
             return
         self.mode = "accessible" if self.mode == "standard" else "standard"
+        self._games = self._compute_games()
+        self._selected_idx = min(self._selected_idx, len(self._games) - 1)
+        self._init_layout(self._screen)
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw(self) -> None:
         self._screen.fill(BG)
         self._draw_title()
-        for i, game_id in enumerate(GAMES):
+        for i, game_id in enumerate(self._games):
             self._draw_card(i, game_id)
         self._draw_hint()
 
@@ -359,6 +386,8 @@ class HomeScreen:
             self._draw_bricks_preview(area, dim)
         elif game_id == "snake":
             self._draw_snake_preview(area, dim)
+        elif game_id == "calibration":
+            self._draw_calibration_preview(area, dim)
 
         self._screen.set_clip(prev_clip)
 
@@ -436,6 +465,69 @@ class HomeScreen:
         pygame.draw.ellipse(self._screen, (min(255, int(55 * alpha / 255)), min(255, int(175 * alpha / 255)), 50),
                             pygame.Rect(fcx + max(1, int(1 * sc)), fcy - max(4, int(8 * sc)),
                                         max(2, int(4 * sc)), max(1, int(2 * sc))))
+
+    def _draw_calibration_preview(self, area: pygame.Rect, dim: int) -> None:
+        """Mini compass + top-down airplane preview for the calibration card."""
+        import math
+        sc  = self._sc
+        cx  = area.centerx
+        cy  = area.centery
+        r   = min(area.width, area.height) // 2 - max(2, int(4 * sc))
+
+        # Compass circle
+        circle_clr = tuple(min(255, int(c * dim / 255)) for c in (40, 80, 120))
+        pygame.draw.circle(self._screen, circle_clr, (cx, cy), r)
+
+        # Cardinal tick marks
+        tick_clr = tuple(min(255, int(c * dim / 255)) for c in (140, 170, 200))
+        for i in range(0, 360, 30):
+            angle   = math.radians(i - 90)
+            major   = (i % 90 == 0)
+            tick_len = r * (0.20 if major else 0.10)
+            x1 = cx + (r - tick_len) * math.cos(angle)
+            y1 = cy + (r - tick_len) * math.sin(angle)
+            x2 = cx + r * math.cos(angle)
+            y2 = cy + r * math.sin(angle)
+            pygame.draw.line(self._screen, tick_clr,
+                             (int(x1), int(y1)), (int(x2), int(y2)), 1)
+
+        # Cardinal labels N / E / S / W
+        lbl_r    = r - max(7, int(12 * sc))
+        card_clr = tuple(min(255, int(c * dim / 255)) for c in (255, 210, 50))
+        for label, deg in [("N", 0), ("E", 90), ("S", 180), ("W", 270)]:
+            angle = math.radians(deg - 90)
+            lx = cx + lbl_r * math.cos(angle)
+            ly = cy + lbl_r * math.sin(angle)
+            surf = self._font_desc.render(label, True, card_clr)
+            self._screen.blit(surf, surf.get_rect(center=(int(lx), int(ly))))
+
+        # Tiny top-down airplane (pointing north)
+        plane_sc  = r / 55.0
+        plane_clr = tuple(min(255, int(c * dim / 255)) for c in (220, 230, 240))
+
+        def _rot(x, y, angle_rad=0.0):
+            cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+            return (int(cx + x * cos_a - y * sin_a),
+                    int(cy + x * sin_a + y * cos_a))
+
+        fuse = [
+            _rot(0,           -28 * plane_sc),
+            _rot(4  * plane_sc, -14 * plane_sc),
+            _rot(5  * plane_sc,  10 * plane_sc),
+            _rot(0,            24 * plane_sc),
+            _rot(-5 * plane_sc,  10 * plane_sc),
+            _rot(-4 * plane_sc, -14 * plane_sc),
+        ]
+        pygame.draw.polygon(self._screen, plane_clr, fuse)
+        for side in (-1, 1):
+            wing = [
+                _rot(side * 4  * plane_sc,  -5 * plane_sc),
+                _rot(side * 28 * plane_sc,   3 * plane_sc),
+                _rot(side * 23 * plane_sc,   8 * plane_sc),
+                _rot(side * 3  * plane_sc,   1 * plane_sc),
+            ]
+            pygame.draw.polygon(self._screen, plane_clr, wing)
+        pygame.draw.circle(self._screen, plane_clr, _rot(0, 0), max(2, int(3 * plane_sc)))
 
     def _draw_hint(self) -> None:
         sc = self._sc
