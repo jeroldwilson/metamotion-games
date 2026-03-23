@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(find /Users/jerold/dev/Bricks/data -name *.pkl -o -name *.json)",
+      "Bash(python3 -c \"from sklearn.ensemble import RandomForestClassifier; print\\(''sklearn OK''\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python3 -c \":*)"
     ]
   }
 }

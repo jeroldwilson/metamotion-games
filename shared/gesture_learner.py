@@ -18,10 +18,11 @@ Architecture
 
 import json
 import math
+import random
 import time
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -326,6 +327,169 @@ class GestureModel:
             return False
 
 
+# ── Validation ────────────────────────────────────────────────────────────────
+
+DIRECTIONS = ("right", "left", "up", "down")
+
+
+@dataclass
+class ValidationResult:
+    """Results from k-fold cross-validation on all saved gesture data."""
+    overall_accuracy: float                         # 0.0–1.0
+    per_class: Dict[str, Dict]                      # {dir: {accuracy, support, tp, fp, fn}}
+    confusion: Dict[str, Dict[str, int]]            # confusion[true][pred] = count
+    n_samples: int
+    n_sessions: int
+    weakest_class: str                              # direction with lowest accuracy
+    error: str = ""                                 # non-empty if validation failed
+
+
+class GestureValidator:
+    """
+    Runs stratified k-fold cross-validation on saved gesture data.
+    Computes overall accuracy, per-direction accuracy, and confusion matrix.
+    Designed to run in a background thread — call validate() and read .result.
+    """
+
+    def __init__(self, dataset: "GestureDataset", n_folds: int = 5):
+        self._dataset  = dataset
+        self._n_folds  = n_folds
+        self.result: Optional[ValidationResult] = None
+        self._running  = False
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        """Kick off validation in a background thread."""
+        if self._running:
+            return
+        self._running = True
+        self.result   = None
+        self._thread  = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            self.result = self._validate()
+        except Exception as exc:
+            self.result = ValidationResult(
+                overall_accuracy=0.0,
+                per_class={}, confusion={},
+                n_samples=0, n_sessions=0,
+                weakest_class="",
+                error=str(exc),
+            )
+        finally:
+            self._running = False
+
+    def _validate(self) -> ValidationResult:
+        X, y = self._dataset.as_xy()
+        n_sessions = len(list(self._dataset.SESSION_DIR.glob("session_*.json"))) \
+            if self._dataset.SESSION_DIR.exists() else 0
+
+        if len(X) < MIN_TRAIN_SAMPLES:
+            return ValidationResult(
+                overall_accuracy=0.0,
+                per_class={d: {"accuracy": 0.0, "support": 0, "tp": 0, "fp": 0, "fn": 0}
+                           for d in DIRECTIONS},
+                confusion={d: {d2: 0 for d2 in DIRECTIONS} for d in DIRECTIONS},
+                n_samples=len(X),
+                n_sessions=n_sessions,
+                weakest_class="",
+                error=f"Need ≥{MIN_TRAIN_SAMPLES} samples (have {len(X)})",
+            )
+
+        # ── Stratified k-fold split ───────────────────────────────────────
+        classes = sorted(set(y))
+        class_idx: Dict[str, List[int]] = {c: [] for c in classes}
+        for i, label in enumerate(y):
+            class_idx[label].append(i)
+        for indices in class_idx.values():
+            random.shuffle(indices)
+
+        k = min(self._n_folds, min(len(v) for v in class_idx.values()))
+        k = max(k, 2)
+
+        folds: List[List[int]] = [[] for _ in range(k)]
+        for indices in class_idx.values():
+            for i, idx in enumerate(indices):
+                folds[i % k].append(idx)
+
+        # ── Cross-validate ────────────────────────────────────────────────
+        all_true: List[str] = []
+        all_pred: List[str] = []
+
+        for fold_i in range(k):
+            test_idx  = folds[fold_i]
+            train_idx = [idx for j, fold in enumerate(folds)
+                         for idx in fold if j != fold_i]
+            if not test_idx or not train_idx:
+                continue
+
+            X_train = [X[i] for i in train_idx]
+            y_train = [y[i] for i in train_idx]
+            X_test  = [X[i] for i in test_idx]
+            y_test  = [y[i] for i in test_idx]
+
+            try:
+                from sklearn.ensemble import RandomForestClassifier
+                clf = RandomForestClassifier(
+                    n_estimators=30, max_depth=8,
+                    class_weight="balanced", random_state=42,
+                )
+                clf.fit(X_train, y_train)
+                preds = clf.predict(X_test)
+                all_true.extend(y_test)
+                all_pred.extend(preds)
+            except Exception:
+                continue
+
+        if not all_true:
+            return ValidationResult(
+                overall_accuracy=0.0,
+                per_class={}, confusion={},
+                n_samples=len(X), n_sessions=n_sessions,
+                weakest_class="", error="CV produced no predictions",
+            )
+
+        # ── Compute metrics ───────────────────────────────────────────────
+        overall_accuracy = sum(t == p for t, p in zip(all_true, all_pred)) / len(all_true)
+
+        # Confusion matrix
+        dirs = [d for d in DIRECTIONS if d in set(y)]
+        confusion: Dict[str, Dict[str, int]] = {d: {d2: 0 for d2 in dirs} for d in dirs}
+        for t, p in zip(all_true, all_pred):
+            if t in confusion and p in confusion[t]:
+                confusion[t][p] += 1
+
+        # Per-class stats
+        per_class: Dict[str, Dict] = {}
+        weakest_acc  = 1.1
+        weakest_class = ""
+        for d in dirs:
+            tp = confusion[d][d]
+            fn = sum(confusion[d][p] for p in dirs if p != d)
+            fp = sum(confusion[t][d] for t in dirs if t != d)
+            support = tp + fn
+            acc = tp / support if support > 0 else 0.0
+            per_class[d] = {"accuracy": acc, "support": support, "tp": tp, "fp": fp, "fn": fn}
+            if acc < weakest_acc:
+                weakest_acc   = acc
+                weakest_class = d
+
+        return ValidationResult(
+            overall_accuracy=overall_accuracy,
+            per_class=per_class,
+            confusion=confusion,
+            n_samples=len(X),
+            n_sessions=n_sessions,
+            weakest_class=weakest_class,
+        )
+
+
 # ── Top-level coordinator ─────────────────────────────────────────────────────
 
 class GestureLearningSystem:
@@ -357,7 +521,29 @@ class GestureLearningSystem:
         self.dataset   = GestureDataset(data_dir)
         self.model     = GestureModel(data_dir)
         self.model.load()
+        # If no saved model but session data exists, retrain immediately
+        if not self.model.ready:
+            X, y = self.dataset.as_xy()
+            if len(X) >= MIN_TRAIN_SAMPLES:
+                print(f"[gesture_learner] No model found but {len(X)} samples exist — retraining…")
+                self.model.train(X, y)
         self._last_rec_flash = 0.0
+        self._validator: Optional[GestureValidator] = None
+
+    # ── Validation ─────────────────────────────────────────────────────────────
+
+    def start_validation(self) -> None:
+        """Launch cross-validation in a background thread (non-blocking)."""
+        self._validator = GestureValidator(self.dataset)
+        self._validator.start()
+
+    @property
+    def validation_running(self) -> bool:
+        return self._validator is not None and self._validator.running
+
+    @property
+    def validation_result(self) -> Optional[ValidationResult]:
+        return self._validator.result if self._validator else None
 
     # ── Per-frame feed ─────────────────────────────────────────────────────────
 
@@ -453,3 +639,16 @@ class GestureLearningSystem:
     @property
     def model_ready(self) -> bool:
         return self.model.ready
+
+    @property
+    def saved_sample_count(self) -> int:
+        """Total samples across all saved sessions (fast — counts without loading features)."""
+        total = 0
+        if not self.dataset.SESSION_DIR.exists():
+            return 0
+        for fp in self.dataset.SESSION_DIR.glob("session_*.json"):
+            try:
+                total += len(json.loads(fp.read_text()))
+            except Exception:
+                pass
+        return total

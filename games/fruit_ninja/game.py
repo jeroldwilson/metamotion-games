@@ -457,11 +457,15 @@ class FruitNinjaGame:
         self._username     = username
         self._gesture_src  = None
         self._submode_toast: float = 0.0   # seconds remaining for toast message
+        self._show_validation: bool = False
 
         # Gesture learning system — created lazily when learn/test mode is active
         self._learner = None
         if game_submode in ("learn", "test"):
             self._init_learner()
+        if game_submode == "test" and self._learner is not None:
+            self._learner.start_validation()
+            self._show_validation = True
 
         _surf_cache.clear()
         self._init_layout(screen)
@@ -485,8 +489,12 @@ class FruitNinjaGame:
         if self._learner is not None and self._game_submode in ("learn", "test"):
             self._learner.save_and_train()
         self._game_submode = new_mode
+        self._show_validation = False
         if new_mode in ("learn", "test"):
             self._init_learner()
+        if new_mode == "test" and self._learner is not None:
+            self._learner.start_validation()
+            self._show_validation = True
         self._submode_toast = 2.5
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -600,6 +608,11 @@ class FruitNinjaGame:
             self._switch_submode("learn")
         elif key == pygame.K_t:
             self._switch_submode("test")
+        elif key == pygame.K_v and self._game_submode == "test":
+            if self._learner is not None:
+                if not self._show_validation:
+                    self._learner.start_validation()
+                self._show_validation = not self._show_validation
         elif key == pygame.K_d:
             self._debug = not self._debug
         elif key == pygame.K_f:
@@ -943,6 +956,8 @@ class FruitNinjaGame:
             self._draw_overlay("PAUSED", "ESC to resume   X to menu")
         if self._game_over:
             self._draw_game_over()
+        if self._show_validation and self._game_submode == "test":
+            self._draw_validation_panel()
 
     def _draw_bg(self) -> None:
         surf = pygame.Surface((self._W, self._H), pygame.SRCALPHA)
@@ -1050,12 +1065,26 @@ class FruitNinjaGame:
 
         elif self._game_submode == "test" and self._learner is not None:
             if self._learner.model_ready:
-                lbl = self._font_sm.render("TEST  MODEL READY  [R=regular L=learn]", True, (100, 220, 255))
+                lbl = self._font_sm.render(
+                    "TEST  MODEL READY  [V=validate  R=regular  L=learn]",
+                    True, (100, 220, 255))
+                self._screen.blit(lbl, lbl.get_rect(
+                    right=self._W - max(4, int(10 * sc)),
+                    bottom=self._H - max(4, int(8 * sc))))
             else:
-                lbl = self._font_sm.render("TEST  NO MODEL  [R=regular L=learn]", True, (255, 140, 100))
-            self._screen.blit(lbl, lbl.get_rect(
-                right=self._W - max(4, int(10 * sc)),
-                bottom=self._H - max(4, int(8 * sc))))
+                n = self._learner.saved_sample_count
+                need = 10
+                if n == 0:
+                    reason = "no data yet — press L to learn first"
+                elif n < need:
+                    reason = f"only {n}/{need} samples — press L and play more"
+                else:
+                    reason = f"{n} samples saved — retraining…"
+                lbl = self._font_sm.render(
+                    f"TEST  NO MODEL  ({reason})", True, (255, 140, 100))
+                self._screen.blit(lbl, lbl.get_rect(
+                    right=self._W - max(4, int(10 * sc)),
+                    bottom=self._H - max(4, int(8 * sc))))
 
         elif self._game_submode == "play":
             hint = self._font_sm.render("L=learn  T=test", True, (100, 100, 130))
@@ -1154,6 +1183,116 @@ class FruitNinjaGame:
 
         ctrl = self._font_sm.render("R = play again   ESC = menu", True, DIM_CLR)
         self._screen.blit(ctrl, ctrl.get_rect(center=(cx, cy + int(82 * sc))))
+
+    def _draw_validation_panel(self) -> None:
+        """
+        Fixed-size validation panel pinned to the bottom-right corner.
+        Size is constant regardless of window/fullscreen resolution.
+        """
+        from shared.gesture_learner import DIRECTIONS
+
+        # ── Fixed pixel dimensions — never scale with sc ──────────────────────
+        PW   = 300   # panel width  (px)
+        PAD  = 10    # inner padding
+        MARGIN = 10  # gap from screen edge
+        FONT = self._font_sm   # always use the small font
+
+        # ── Fonts baked at fixed sizes (independent of sc) ────────────────────
+        f_title = pygame.font.SysFont("monospace", 11, bold=True)
+        f_body  = pygame.font.SysFont("monospace", 10)
+
+        # ── Build content lines first so we know panel height ─────────────────
+        lines = []   # list of (text, color, indent)
+
+        def add(text, color=(180, 180, 200), indent=0):
+            lines.append((text, color, indent))
+
+        add("MODEL VALIDATION  [V close]", (100, 180, 255))
+        add("")
+
+        if self._learner is None:
+            add("No learner.", (200, 100, 100))
+        elif self._learner.validation_running:
+            dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
+            add(f"Validating{dots}", (220, 210, 80))
+            add("5-fold CV running…", (110, 110, 140))
+        else:
+            res = self._learner.validation_result
+            if res is None:
+                add("Press V to validate.", (140, 140, 170))
+            elif res.error:
+                add(f"! {res.error}", (220, 90, 70))
+            else:
+                acc_pct = int(res.overall_accuracy * 100)
+                acc_clr = (80, 215, 100) if acc_pct >= 75 else \
+                          (230, 195, 55) if acc_pct >= 55 else (215, 75, 75)
+                add(f"Accuracy: {acc_pct}%", acc_clr)
+                add(f"{res.n_samples} samples  {res.n_sessions} sessions", (110, 110, 140))
+                add("")
+
+                dir_labels = {"right": "→R", "left": "←L", "up": "↑U", "down": "↓D"}
+                dirs_in_data = [d for d in DIRECTIONS if d in res.per_class]
+
+                add("Dir   Acc   n    bar", (110, 110, 150))
+                add("─" * 28, (50, 50, 75))
+                for d in dirs_in_data:
+                    info    = res.per_class[d]
+                    pct     = int(info["accuracy"] * 100)
+                    support = info["support"]
+                    is_weak = (d == res.weakest_class)
+                    clr     = (255, 215, 70) if is_weak else (185, 185, 210)
+                    bar_filled = int(info["accuracy"] * 8)
+                    bar_str    = "█" * bar_filled + "░" * (8 - bar_filled)
+                    add(f"{dir_labels[d]:<5} {pct:>3}%  {support:>3}  {bar_str}", clr)
+
+                add("")
+                short = {"right": "R", "left": "L", "up": "U", "down": "D"}
+                dirs_m = [d for d in DIRECTIONS if d in res.confusion]
+                if dirs_m:
+                    add("Confusion (true→pred):", (110, 110, 150))
+                    hdr = "     " + "  ".join(f"{short[d]:<2}" for d in dirs_m)
+                    add(hdr, (100, 130, 170))
+                    max_off = max(
+                        (res.confusion[t][p] for t in dirs_m for p in dirs_m if t != p),
+                        default=1) or 1
+                    for true_d in dirs_m:
+                        row = f"{short[true_d]:<3}  "
+                        row += "  ".join(f"{res.confusion[true_d].get(p,0):<2}" for p in dirs_m)
+                        diag_ok = res.confusion[true_d].get(true_d, 0)
+                        row_clr = (80, 200, 100) if diag_ok >= res.per_class[true_d]["support"] * 0.7 \
+                                  else (185, 185, 210)
+                        add(row, row_clr)
+
+                if res.weakest_class and not res.error:
+                    weak_acc = int(res.per_class[res.weakest_class]["accuracy"] * 100)
+                    if weak_acc < 80:
+                        arrow = {"right": "→", "left": "←", "up": "↑", "down": "↓"}
+                        add("")
+                        add(f"Tip: more {arrow.get(res.weakest_class,'')} {res.weakest_class} ({weak_acc}%)",
+                            (255, 210, 70))
+
+        # ── Measure height ────────────────────────────────────────────────────
+        LINE_H = 13
+        PH = PAD * 2 + len(lines) * LINE_H
+
+        # ── Position: bottom-right corner, fixed margin ───────────────────────
+        px = self._W - PW - MARGIN
+        py = self._H - PH - MARGIN
+
+        # ── Draw panel background (semi-transparent) ──────────────────────────
+        panel = pygame.Surface((PW, PH), pygame.SRCALPHA)
+        panel.fill((6, 6, 18, 155))        # more transparent: alpha 155
+        self._screen.blit(panel, (px, py))
+        pygame.draw.rect(self._screen, (60, 100, 170, 180),
+                         (px, py, PW, PH), 1, border_radius=6)
+
+        # ── Render text lines ─────────────────────────────────────────────────
+        iy = py + PAD
+        for text, color, *_ in lines:
+            if text:
+                surf = f_body.render(text, True, color)
+                self._screen.blit(surf, (px + PAD, iy))
+            iy += LINE_H
 
     def _draw_star(self, cx, cy, size, color, filled) -> None:
         pts = []
